@@ -8,3 +8,8 @@ dataset.save_to_disk("/path/to/")
 
 # 下载glm-10b
 https://huggingface.co/THUDM/glm-10b
+
+# 训练
+```bash
+bash launch_glm10b_training.sh
+```
