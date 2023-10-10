@@ -947,9 +947,9 @@ def main():
             print(f"epoch {epoch}: perplexity: {perplexity}")
         print(f"eval_loss: {eval_loss}")
 
-    print(torch.cuda.memory_summary(device))
-    if atorch.local_rank() == 0:
-        execute_nvidia_smi(timeout=10)
+    # print(torch.cuda.memory_summary(device))
+    # if atorch.local_rank() == 0:
+    #     execute_nvidia_smi(timeout=10)
 
         # if args.with_tracking:
         #     logger.info(
