@@ -17,10 +17,13 @@ from typing import Dict, List
 
 
 class InferenceName:
-    END = "end"
+    NONE = "none"
     TRAINING = "training"
     NODE = "node"
     WORKER = "worker"
+    ACTION = "action"
+    RESOURCE = "resource"
+    GPU = "gpu"
 
 
 class InferenceAttribute:
@@ -31,9 +34,13 @@ class InferenceAttribute:
 
 
 class InferenceDescription:
+    NONE = "n/a"
     HANG = "hang"
     FAILURE = "failure"
     METRICS = "metrics"
+    EVENT = "event"
+    ERROR = "error"
+    RESOURCE = "resource"
 
 
 @dataclass
@@ -102,3 +109,13 @@ def combine_inferences(
         inferences.append(inference1)
 
     return inferences
+
+
+def is_training_hanged(inf: Inference):
+    if (
+        inf.name == InferenceName.TRAINING
+        and inf.attribution == InferenceAttribute.IS
+        and inf.description == InferenceDescription.HANG
+    ):
+        return True
+    return False
