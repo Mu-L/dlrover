@@ -13,9 +13,13 @@
 
 import socket
 import telnetlib
+import threading
+import time
 import unittest
-from unittest.mock import patch
+from unittest import mock
+from unittest.mock import MagicMock, patch
 
+from dlrover.python.common.constants import PreCheckStatus
 from dlrover.python.elastic_agent.master_client import (
     MasterClient,
     build_master_client,
@@ -27,12 +31,20 @@ from dlrover.trainer.torch.elastic_run import (
     _elastic_config_from_args,
     _launch_dlrover_local_master,
     parse_args,
+    wait_pre_check,
 )
 
 MC_PATH = "dlrover.python.elastic_agent.master_client.MasterClient"
 
 
 class ElasticRunTest(unittest.TestCase):
+    def setUp(self):
+        self._master, addr = start_local_master()
+        MasterClient._instance = build_master_client(addr, 1)
+
+    def tearDown(self):
+        self._master.stop()
+
     @patch(f"{MC_PATH}.report_failures")
     def test_launch_local_master(self, some_func):
         available = _check_dlrover_master_available("", timeout=3)
@@ -58,14 +70,12 @@ class ElasticRunTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _check_to_use_dlrover_run("", 2, 3)
         with self.assertRaises(ValueError):
-            _check_to_use_dlrover_run("127.0.0.1:12345", 2, 3)
+            _check_to_use_dlrover_run("127.0.0.1:23456", 2, 3)
 
     def test_elastic_config_from_args(self):
-        self._master, addr = start_local_master()
-        MasterClient._instance = build_master_client(addr, 1)
         args = [
-            "--network_check",
-            "--comm_perf_test",
+            "--precheck",
+            "1",
             "--auto_tunning",
             "--node_unit",
             "4",
@@ -79,19 +89,18 @@ class ElasticRunTest(unittest.TestCase):
         ]
         args = parse_args(args)
         config, cmd, cmd_args = _elastic_config_from_args(args)
+        self.assertEqual(config.precheck, 1)
         self.assertTrue(config.network_check)
-        self.assertTrue(config.comm_perf_test)
+        self.assertFalse(config.comm_perf_test)
         self.assertTrue(config.auto_tunning)
         self.assertEqual(config.node_unit, 4)
         self.assertEqual(config.rdzv_configs["node_unit"], 4)
         self.assertEqual(config.training_port, 1000)
-        self.assertEqual(cmd, "/usr/local/bin/python")
+        self.assertTrue("bin/python" in cmd)
         self.assertListEqual(cmd_args, ["-u", "test.py", "--batch_size", "16"])
 
     @patch(f"{MC_PATH}.get_elastic_run_config")
-    def test_elastic_config_from_master(self, mock_func):
-        self._master, addr = start_local_master()
-        MasterClient._instance = build_master_client(addr, 1)
+    def test_elastic_config_from_master_1(self, mock_func):
         mock_func.return_value = {
             "network_check": "True",
             "comm_perf_test": "True",
@@ -115,3 +124,48 @@ class ElasticRunTest(unittest.TestCase):
         self.assertTrue(config.auto_config)
         self.assertTrue(config.exclude_straggler)
         self.assertTrue(config.save_at_breakpoint)
+
+    def test_elastic_config_from_master_2(self):
+        MasterClient._instance.get_elastic_run_config = mock.MagicMock(
+            side_effect=Exception()
+        )
+
+        args = [
+            "--training_port",
+            "1000",
+            "test.py",
+            "--batch_size",
+            "16",
+        ]
+        args = parse_args(args)
+        config, cmd, cmd_args = _elastic_config_from_args(args)
+        self.assertFalse(config.network_check)
+
+    def test_wait_pre_check(self):
+        client = MasterClient.singleton_instance()
+
+        # pre-check success
+        client.get_pre_check_result = MagicMock(
+            return_value=PreCheckStatus.PASS
+        )
+        wait_pre_check()
+
+        # pre-check fail
+        client.get_pre_check_result = MagicMock(
+            return_value=PreCheckStatus.FAIL
+        )
+
+        def set_pre_check_success():
+            time_to_set_success = time.time()
+            while True:
+                if time.time() - time_to_set_success > 1:
+                    client.get_pre_check_result = MagicMock(
+                        return_value=PreCheckStatus.PASS
+                    )
+                    break
+                time.sleep(0.1)
+
+        start = time.time()
+        threading.Thread(target=set_pre_check_success).start()
+        wait_pre_check()
+        self.assertTrue(time.time() - start > 0.5)

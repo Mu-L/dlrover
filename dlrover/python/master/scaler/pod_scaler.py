@@ -101,6 +101,7 @@ class PodScaler(Scaler):
         self._job_uid = ""
         self.api_client = client.ApiClient()
         self._master_addr = ""
+        self._master_service_type = _dlrover_context.master_service_type
         self._error_monitor = error_monitor
         self._started = False
 
@@ -472,9 +473,12 @@ class PodScaler(Scaler):
         env.append(V1EnvVar(name=NodeEnv.JOB_NAME, value=self._job_name))
         env.append(V1EnvVar(name=NodeEnv.JOB_UID, value=self._job_uid))
 
-        # A deadlock can happen when pthread_atfork handler is running.
-        # For detail https://chromium.googlesource.com/external/github.com/grpc/grpc/+/refs/tags/v1.19.0-pre1/doc/fork_support.md  # noqa: E501
-        env.append(V1EnvVar(name=NodeEnv.GRPC_ENABLE_FORK, value="False"))
+        # History background1: https://chromium.googlesource.com/external/
+        # github.com/grpc/grpc/+/refs/tags/v1.19.0-pre1/doc/fork_support.md
+        #
+        # History background2: https://github.com/grpc/grpc/issues/18075
+        # resolved by: https://github.com/grpc/grpc/pull/32935
+        env.append(V1EnvVar(name=NodeEnv.GRPC_ENABLE_FORK, value="false"))
 
         worker_num = self._config_worker_num
         if worker_num == 0:
@@ -497,6 +501,7 @@ class PodScaler(Scaler):
 
         # Deprecated env vars
         env.append(V1EnvVar(name=NodeEnv.WORKER_TYPE, value=node.type))
+
         env.append(V1EnvVar(name=NodeEnv.WORKER_ID, value=str(node.id)))
         env.append(V1EnvVar(name=NodeEnv.WORKER_NUM, value=str(worker_num)))
         env.append(
@@ -504,6 +509,12 @@ class PodScaler(Scaler):
         )
         env.append(
             V1EnvVar(name=NodeEnv.DLROVER_MASTER_ADDR, value=self._master_addr)
+        )
+        env.append(
+            V1EnvVar(
+                name=NodeEnv.DLROVER_MASTER_SERVICE_TYPE,
+                value=self._master_service_type,
+            )
         )
 
         env.append(

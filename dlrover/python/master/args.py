@@ -13,7 +13,19 @@
 
 import argparse
 
+from dlrover.python.common.global_context import DefaultValues
 from dlrover.python.common.log import default_logger as logger
+
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    if value.lower() in {"true", "yes", "t", "y", "1"}:
+        return True
+    elif value.lower() in {"false", "no", "n", "0"}:
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
 def add_params(parser):
@@ -30,6 +42,35 @@ def add_params(parser):
         default="pyk8s",
         type=str,
         help="The name of platform which can be pyk8s, k8s, ray or local.",
+    )
+    parser.add_argument(
+        "--pending_timeout",
+        "--pending-timeout",
+        default=DefaultValues.SEC_TO_WAIT_PENDING_POD,
+        type=int,
+        help="The timeout value of pending.",
+    )
+    parser.add_argument(
+        "--pending_fail_strategy",
+        "--pending-fail-strategy",
+        default=DefaultValues.PENDING_FAIL_STRATEGY,
+        type=int,
+        help="The fail strategy for pending case. "
+        "Options: -1: disabled; 0: skip; 1: necessary part; 2: all",
+    )
+    parser.add_argument(
+        "--service_type",
+        "--service-type",
+        default="grpc",
+        type=str,
+        help="The service type of master: grpc/http.",
+    )
+    parser.add_argument(
+        "--pre_check",
+        "--pre_check",
+        default=DefaultValues.PRE_CHECK_ENABLED,
+        type=str2bool,
+        help="Enable pre training check or not.",
     )
 
 
@@ -85,6 +126,25 @@ def _build_master_args_parser():
         default=1,
         type=pos_int,
         help="The number of nodes",
+    )
+    parser.add_argument(
+        "--hang_detection",
+        default=1,
+        type=pos_int,
+        help="The strategy of 'hang detection', "
+        "0: log only; 1: notify; 2: with fault tolerance",
+    )
+    parser.add_argument(
+        "--hang_downtime",
+        default=30,
+        type=pos_int,
+        help="Training downtime to detect job hang, unit is minute",
+    )
+    parser.add_argument(
+        "--xpu_type",
+        default="nvidia",
+        type=str,
+        help="The type of XPU, should be 'nvidia' or 'ascend'",
     )
     add_params(parser)
     return parser

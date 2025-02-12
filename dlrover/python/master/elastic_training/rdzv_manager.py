@@ -187,7 +187,7 @@ class RendezvousManager(metaclass=ABCMeta):
                 f"/{self._rdzv_params.max_nodes}) in rendezvous(size:"
                 f"{len(waiting_nodes)}) are {waiting_nodes}, "
                 f"lacking ranks(size:{len(lacking_ranks)}) "
-                f"are {lacking_ranks}"
+                f"are {lacking_ranks} for round {self._rdzv_round}"
             )
         return rdzv_completed
 
@@ -287,8 +287,8 @@ class RendezvousManager(metaclass=ABCMeta):
                 psw=psw,
             )
             logger.info(
-                f"Worker node with id: {meta.node_id} "
-                f"and rank: {meta.node_rank} "
+                f"Worker node with id: {meta.node_id}, "
+                f"rank: {meta.node_rank} and ip: {meta.node_ip} "
                 f"joining rendezvous for round: {self._rdzv_round}."
             )
             self._waiting_nodes[node_rank] = meta
@@ -769,7 +769,6 @@ class NetworkCheckRendezvousManager(RendezvousManager):
         """
         with self._lock:
             reason = ""
-            stragglers: Dict[int, float] = {}
             if len(self._reported_nodes) < len(self._rdzv_nodes):
                 reason = NetworkFailureReason.WAITING_NODE
             elif len(self._straggler_nodes) == 0:

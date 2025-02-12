@@ -28,6 +28,11 @@ class PlatformType(object):
     LOCAL = "local"
 
 
+class CommunicationType(object):
+    COMM_SERVICE_GRPC = "grpc"
+    COMM_SERVICE_HTTP = "http"
+
+
 class ElasticJobApi(object):
     GROUP = "elastic.iml.github.io"
     VERION = "v1alpha1"
@@ -89,6 +94,42 @@ class NodeEventType(object):
     MODIFIED = "MODIFIED"
     DELETED = "DELETED"
     ERROR = "ERROR"
+    FINISHED = "FINISHED"
+    SUCCEEDED_EXITED = "SUCCEEDED_EXITED"
+    FAILED_EXITED = "FAILED_EXITED"
+    NODE_CHECK_SUCCEEDED = "NODE_CHECK_SUCCEEDED"
+    NODE_CHECK_FAILED = "NODE_CHECK_FAILED"
+
+
+class GpuMetricEnum(object):
+    """
+    it is the metrics enum of nvidia GPU, collected by DCGM
+    """
+
+    GPU_FREE_MEM = "DCGM_FI_DEV_FB_FREE"
+    GPU_USED_MEM = "DCGM_FI_DEV_FB_USED"
+    GPU_UTIL = "DCGM_FI_DEV_GPU_UTIL"
+    GPU_TEMP = "DCGM_FI_DEV_GPU_TEMP"
+    GPU_SM_UTIL = "DCGM_FI_PROF_SM_OCCUPANCY"
+    GPU_SM_ACTIVE = "DCGM_FI_PROF_SM_ACTIVE"
+    GPU_TENSOR_UTIL = "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE"
+
+
+class NpuMetricEnum(object):
+    """
+    it is the metrics enum of Ascend NPU, collected by DCMI
+    """
+
+    NPU_TOTAL_MEM = "npu_chip_info_total_memory"
+    NPU_USED_MEM = "npu_chip_info_used_memory"
+    NPU_UTIL = "npu_chip_info_utilization"
+    NPU_TEMP = "npu_chip_info_temperature"
+    NPU_HEALTH_STATE = "npu_chip_info_health_status"
+    NPU_LINK_STATE = "npu_chip_info_link_status"
+    NPU_OPTICAL_STATE = "npu_chip_optical_state"
+    NPU_NETWORK_STATE = "npu_chip_info_network_status"
+    NPU_RDMA_RX = "npu_chip_info_bandwidth_rx"
+    NPU_RDMA_TX = "npu_chip_info_bandwidth_tx"
 
 
 class NodeExitReason(object):
@@ -114,6 +155,7 @@ class JobExitReason(object):
     RDZV_TIMEOUT_ERROR = "RdzvTimeout"
     PENDING_TIMEOUT = "PendingTimeout"
     UNCOMPLETED_TIMEOUT = "UncompletedTimeout"
+    NODE_CHECK_FAILED = "NodeCheckFailed"
 
 
 class CustomMetricKeys:
@@ -211,7 +253,9 @@ class TrainingLoopStatus(object):
 class NodeEnv(object):
     RELAUNCHED_POD = "RELAUNCHED_POD"
     DLROVER_MASTER_ADDR = "DLROVER_MASTER_ADDR"
+    DLROVER_MASTER_SERVICE_TYPE = "DLROVER_MASTER_SERVICE_TYPE"
     GRPC_ENABLE_FORK = "GRPC_ENABLE_FORK_SUPPORT"
+    GRPC_POLL_STRATEGY = "GRPC_POLL_STRATEGY"
     POD_NAME = "POD_NAME"
     MONITOR_ENABLED = "MONITOR_ENABLED"
     JOB_NAME = "ELASTIC_JOB_NAME"
@@ -232,12 +276,17 @@ class NodeEnv(object):
     RANK = "RANK"  # It is the rank of node not the rank of process.
     WORLD_SIZE = "WORLD_SIZE"  # It is the number of nodes.
 
-    # process env
+    # worker process env
     TORCHELASTIC_RUN_ID = "TORCHELASTIC_RUN_ID"
+    MASTER_ADDR = "MASTER_ADDR"
+    MASTER_PORT = "MASTER_PORT"
 
     # diagnosis env
     TRAINING_LOG_FILE = "TRAINING_LOG_FILE"
     FAILURE_NODE_ERRORS = "FAILURE_NODE_ERRORS"
+
+    # grpc env
+    MASTER_CLIENT_TIMEOUT = "MASTER_CLIENT_TIMEOUT"
 
 
 class DatasetType(object):
@@ -315,6 +364,38 @@ class JobConstant(object):
     INSUFFICIENT_NODE_TIMEOUT_DEFAULT_MIN = 600
     INSUFFICIENT_NODE_TIMEOUT_DEFAULT_MAX = 3600
     PENDING_NODE_TIMEOUT_DEFAULT_MIN = 600
+    NODE_CHECK_TIMEOUT = 300
+
+    # timeout 60s
+    MASTER_CLIENT_DEFAULT_TIMEOUT = 60
+
+    # grpc timeout 60s
+    MASTER_CLIENT_GRPC_DEFAULT_TIMEOUT = 60
+
+    # master_client.check_fault_node/check_straggler timeout value
+    # must > NODE_CHECK_TIMEOUT
+    MASTER_CLIENT_CHECK_NODE_TIMEOUT = 360
+
+    # sleep 1s on NetworkFailureReason.WAITING_NODE
+    MASTER_CLIENT_CHECK_FAULT_SLEEP_TIMEOUT = 1
+
+    # sleep 1s on NetworkFailureReason.WAITING_NODE
+    MASTER_CLIENT_CHECK_STRAGGLER_SLEEP_TIMEOUT = 1
+
+    # sleep 5s before next node check round
+    NODE_CHECK_NEXT_ROUND_TIMEOUT = 5
+
+    # default interval seconds for loop in training agent
+    TRAINING_AGENT_LOOP_DEFAULT_INTERVAL = 15
+
+    # sleep 5s before next rendezvous round
+    RENDEZVOUS_DEFAULT_INTERVAL = 5
+
+    # sleep 5s before next port synchronization
+    SYNC_PORTS_DEFAULT_INTERVAL = 5
+
+    # interval seconds for pre-check waiting
+    PRE_CHECK_WAIT_SECS = 5
 
 
 class Accelerators(object):
@@ -333,7 +414,10 @@ class AscendConstants(object):
 
 class ErrorMonitorConstants(object):
     TYPE_INFO = "info"
+    TYPE_WARN = "warn"
     TYPE_ERROR = "error"
+
+    JOB_INSTANCE = "job"
 
     ACTION_WORKER_CREATE = "worker_create"
     ACTION_STATUS_UPDATE = "status_update"
@@ -347,3 +431,18 @@ class ErrorMonitorConstants(object):
     ACTION_RDZV_TIMEOUT = "rendezvous_timeout"
     ACTION_TRAINING_START = "training_start"
     ACTION_RESTART_TRAINING = "restart_training"
+    ACTION_SAVE_SHARD_START = "save_shard_start"
+    ACTION_SAVE_SHARD_COMPLETE = "save_shard_complete"
+    ACTION_SAVE_SHARD_ERROR = "save_shard_error"
+    ACTION_MEM_CKPT_START = "mem_ckpt_start"
+    ACTION_MEM_CKPT_COMPLETE = "mem_ckpt_complete"
+    ACTION_RESUME_MEM_CKPT_START = "resume_mem_ckpt_start"
+    ACTION_RESUME_MEM_CKPT_COMPLETE = "resume_mem_ckpt_complete"
+    ACTION_HANG_WARN = "hang_warning"
+
+
+class PreCheckStatus(object):
+    CHECKING = "CHECKING"
+    FAIL = "FAIL"
+    PASS = "PASS"
+    DISABLED = "DISABLED"
