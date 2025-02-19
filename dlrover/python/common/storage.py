@@ -136,7 +136,7 @@ class PosixDiskStorage(CheckpointStorage):
                 os.fsync(stream.fileno())
         except OSError as e:
             logger.error(
-                f"Failed to write file with path: {path}, " f"mode: {mode}"
+                f"Failed to write file with path: {path}, mode: {mode}"
             )
             raise e
 
@@ -306,7 +306,7 @@ class PosixStorageWithDeletion(PosixDiskStorage):
 
     def commit(self, step, success):
         super().commit(step, success)
-        if not success or self._pre_step == step:
+        if not success or self._pre_step == step or self._pre_step == 0:
             return
         self._deletion_strategy.clean_up(self._pre_step, shutil.rmtree)
 

@@ -13,6 +13,7 @@
 
 import datetime
 import os
+import time
 from unittest import mock
 
 import yaml
@@ -20,6 +21,7 @@ from kubernetes import client
 
 import dlrover.python.util.k8s_util as ku
 from dlrover.proto import elastic_training_pb2
+from dlrover.python.common.comm import addr_connected
 from dlrover.python.common.constants import (
     DistributionStrategy,
     ElasticJobLabel,
@@ -27,7 +29,6 @@ from dlrover.python.common.constants import (
     NodeType,
     PlatformType,
 )
-from dlrover.python.common.grpc import find_free_port
 from dlrover.python.common.node import NodeGroupResource, NodeResource
 from dlrover.python.master.local_master import LocalJobMaster
 from dlrover.python.master.monitor.speed_monitor import SpeedMonitor
@@ -35,6 +36,7 @@ from dlrover.python.master.shard.dataset_splitter import new_dataset_splitter
 from dlrover.python.master.shard.task_manager import TaskManager
 from dlrover.python.scheduler.job import JobArgs, LocalJobArgs, NodeArgs
 from dlrover.python.scheduler.kubernetes import k8sClient
+from dlrover.python.util.common_util import find_free_port
 
 WITH_TO_DELETED = "WITH_TO_DELETED"
 
@@ -119,6 +121,23 @@ class MockK8sAllreduceJobArgs(JobArgs):
     def initilize(self, worker_count=16):
         worker_resource = NodeGroupResource(
             worker_count, NodeResource(1, 4096, "a100", 8)
+        )
+        self.node_args[NodeType.WORKER] = NodeArgs(
+            worker_resource, True, 3, 0, ""
+        )
+        self.job_uuid = "11111"
+        self.distribution_strategy = DistributionStrategy.ALLREDUCE
+
+
+class MockK8sJobWithoutCPURequestArgs(JobArgs):
+    def __init__(self):
+        super(MockK8sJobWithoutCPURequestArgs, self).__init__(
+            PlatformType.KUBERNETES, "default", "test"
+        )
+
+    def initilize(self, worker_count=16):
+        worker_resource = NodeGroupResource(
+            worker_count, NodeResource(0, 0, "a100", 8)
         )
         self.node_args[NodeType.WORKER] = NodeArgs(
             worker_resource, True, 3, 0, ""
@@ -324,4 +343,8 @@ def start_local_master(port=12345):
     master = LocalJobMaster(port, job_args)
     master.prepare()
     addr = f"127.0.0.1:{port}"
+    for _ in range(10):
+        if addr_connected(addr):
+            break
+        time.sleep(1)
     return master, addr

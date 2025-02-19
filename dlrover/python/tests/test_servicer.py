@@ -10,24 +10,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import os
 import time
 import unittest
 from unittest import mock
 
 import ray
+import requests
 
 from dlrover.proto import elastic_training_pb2
-from dlrover.python.common import env_utils, grpc
+from dlrover.python.common import comm, env_utils
+from dlrover.python.common.comm import BaseRequest, GPUStats
 from dlrover.python.common.constants import (
+    NodeEventType,
     NodeStatus,
     NodeType,
     PSClusterVersionType,
     RendezvousName,
 )
-from dlrover.python.common.grpc import GPUStats
+from dlrover.python.common.global_context import Context
 from dlrover.python.diagnosis.common.diagnosis_data import WorkerTrainingMetric
-from dlrover.python.master.diagnosis.diagnosis import DiagnosisManager
+from dlrover.python.master.diagnosis.diagnosis_manager import DiagnosisManager
 from dlrover.python.master.elastic_training.elastic_ps import ElasticPsService
 from dlrover.python.master.elastic_training.rdzv_manager import (
     ElasticTrainingRendezvousManager,
@@ -36,7 +40,11 @@ from dlrover.python.master.elastic_training.rdzv_manager import (
 from dlrover.python.master.elastic_training.sync_service import SyncService
 from dlrover.python.master.monitor.speed_monitor import SpeedMonitor
 from dlrover.python.master.node.dist_job_manager import create_job_manager
-from dlrover.python.master.servicer import MasterServicer
+from dlrover.python.master.node.job_context import get_job_context
+from dlrover.python.master.servicer import (
+    GrpcMasterServicer,
+    create_master_service,
+)
 from dlrover.python.master.shard.task_manager import TaskManager
 from dlrover.python.master.stats.job_collector import JobMetricCollector
 from dlrover.python.tests.test_utils import (
@@ -47,9 +55,97 @@ from dlrover.python.tests.test_utils import (
 from dlrover.python.util.queue.queue import RayEventQueue
 
 ray_event_queue = RayEventQueue.singleton_instance()
+TEST_SERVER_PORT = 8000
 
 
-class MasterServicerTest(unittest.TestCase):
+class MasterServicerBasicTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.server = None
+
+    def tearDown(self) -> None:
+        context = Context.singleton_instance()
+        context.master_service_type = "grpc"
+        if self.server:
+            self.server.stop(grace=None)
+
+    def test_http_start_and_stop(self):
+        context = Context.singleton_instance()
+        context.master_service_type = "http"
+        self.server = create_master_service(
+            TEST_SERVER_PORT,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        self.assertIsNotNone(self.server)
+        self.assertFalse(self.server.is_serving())
+
+        self.server.start()
+        self.assertTrue(self.server.is_serving())
+
+        self.server.stop()
+        self.assertFalse(self.server.is_serving())
+
+    def test_grpc_start_and_stop(self):
+        self.server = create_master_service(
+            TEST_SERVER_PORT,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        self.assertIsNotNone(self.server)
+        self.server.start()
+        self.server.stop(grace=None)
+
+    def test_http_basic(self):
+        context = Context.singleton_instance()
+        context.master_service_type = "http"
+        self.server = create_master_service(
+            TEST_SERVER_PORT,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        self.server.start()
+
+        response = requests.get("http://localhost:8000/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "Not supported")
+
+        request = BaseRequest()
+        request.node_id = 1
+        request.node_type = "worker"
+        request.data = "test".encode()
+        response = requests.post(
+            "http://localhost:8000/get", json=request.to_json()
+        )
+        self.assertEqual(response.status_code, 200)
+        response_content = comm.deserialize_message(response.content)
+        self.assertIsNotNone(response_content)
+        self.assertTrue(response_content.success)
+
+        self.server.stop()
+
+
+class MasterServicerFunctionalTest(unittest.TestCase):
     def setUp(self) -> None:
         mock_k8s_client()
         params = MockK8sPSJobArgs()
@@ -59,11 +155,16 @@ class MasterServicerTest(unittest.TestCase):
         worker_resource.node_resource.gpu_type = "a100"
         speed_monitor = SpeedMonitor()
         self.task_manager = TaskManager(False, speed_monitor)
+
         self.job_manager = create_job_manager(params, speed_monitor)
+        self.job_context = get_job_context()
+
         self.job_manager._init_nodes()
         self.job_manager._init_job_auto_scaler()
-        for node in self.job_manager._job_nodes[NodeType.WORKER].values():
+        job_nodes = self.job_context.job_nodes_by_type(NodeType.WORKER)
+        for node in job_nodes.values():
             node.status = NodeStatus.RUNNING
+            self.job_context.update_job_node(node)
         self.job_metric_collector = JobMetricCollector(
             "1", "default", "local", "dlrover"
         )
@@ -74,7 +175,7 @@ class MasterServicerTest(unittest.TestCase):
             RendezvousName.NETWORK_CHECK: NetworkCheckRendezvousManager(),
         }
         sync_service = SyncService(self.job_manager)
-        self.servicer = MasterServicer(
+        self.servicer = GrpcMasterServicer(
             task_manager=self.task_manager,
             job_manager=self.job_manager,
             speed_monitor=speed_monitor,
@@ -87,17 +188,18 @@ class MasterServicerTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         os.environ.clear()
+        self.job_context.clear_job_nodes()
 
     def test_query_running_nodes(self):
         request = elastic_training_pb2.Message()
-        message = grpc.RunningNodesRequest()
+        message = comm.RunningNodesRequest()
         request.data = message.serialize()
         res = self.servicer.get(request, None)
-        ret: grpc.RunningNodes = grpc.deserialize_message(res.data)
+        ret: comm.RunningNodes = comm.deserialize_message(res.data)
         self.assertEqual(len(ret.nodes), 3)
 
     def test_dataset_service(self):
-        request = grpc.DatasetShardParams()
+        request = comm.DatasetShardParams()
         request.batch_size = 10
         request.num_epochs = 1
         request.dataset_size = 1000
@@ -111,19 +213,19 @@ class MasterServicerTest(unittest.TestCase):
         collector = self.job_metric_collector._stats_reporter
         self.assertEqual(collector._dataset_metric.get_size(), 1000)
 
-        request = grpc.TaskRequest("test")
-        task: grpc.Task = self.servicer._get_task(NodeType.WORKER, 0, request)
+        request = comm.TaskRequest("test")
+        task: comm.Task = self.servicer._get_task(NodeType.WORKER, 0, request)
         self.assertEqual(task.task_id, 0)
         self.assertEqual(task.shard.start, 0)
         self.assertEqual(task.shard.end, 100)
 
-        request = grpc.TaskResult(dataset_name="test", task_id=0)
+        request = comm.TaskResult(dataset_name="test", task_id=0)
         request.task_id = 0
         request.dataset_name = "test"
         self.servicer._report_task_result(request)
         self.assertEqual(len(self.task_manager._datasets["test"].doing), 0)
 
-        request = grpc.ShardCheckpointRequest("test")
+        request = comm.ShardCheckpointRequest("test")
         request.dataset_name = "test"
 
         checkpoint = self.servicer._get_shard_checkpoint(request)
@@ -133,7 +235,7 @@ class MasterServicerTest(unittest.TestCase):
     def test_metric_service(self):
         self.job_manager._init_nodes()
         self.job_manager._init_job_auto_scaler()
-        request = grpc.ResourceStats(gpu_stats=[])
+        request = comm.ResourceStats(gpu_stats=[])
         request.memory = 4096
         request.cpu = 2
         gpu_stats: list[GPUStats] = [
@@ -145,7 +247,7 @@ class MasterServicerTest(unittest.TestCase):
             )
         ]
         for gpu in gpu_stats:
-            gpu_stats_message = grpc.GPUStats()
+            gpu_stats_message = comm.GPUStats()
             gpu_stats_message.index = gpu.index
             gpu_stats_message.total_memory_mb = gpu.total_memory_mb
             gpu_stats_message.used_memory_mb = gpu.used_memory_mb
@@ -154,8 +256,8 @@ class MasterServicerTest(unittest.TestCase):
         self.servicer._update_node_resource_usage(NodeType.WORKER, 0, request)
         self.servicer._update_node_resource_usage(NodeType.PS, 0, request)
 
-        request = grpc.ModelInfo(
-            tensor_stats=grpc.TensorStats(), op_stats=grpc.OpStats()
+        request = comm.ModelInfo(
+            tensor_stats=comm.TensorStats(), op_stats=comm.OpStats()
         )
         request.tensor_stats.variable_count = 100
         request.tensor_stats.total_variable_size = 10000
@@ -167,11 +269,16 @@ class MasterServicerTest(unittest.TestCase):
         reporter._runtime_stats = []
         self.assertEqual(reporter._model_info.op_stats.flops, 10000)
 
-        worker0 = self.job_manager._job_nodes[NodeType.WORKER][0]
+        job_nodes = self.job_context.job_nodes()
+        worker0 = job_nodes[NodeType.WORKER][0]
         worker0.status = NodeStatus.RUNNING
-        ps0 = self.job_manager._job_nodes[NodeType.PS][0]
+        self.job_context.update_job_node(worker0)
+
+        ps0 = job_nodes[NodeType.PS][0]
         ps0.status = NodeStatus.RUNNING
-        request = grpc.GlobalStep()
+        self.job_context.update_job_node(ps0)
+
+        request = comm.GlobalStep()
         self.task_manager._speed_monitor.add_running_worker(NodeType.WORKER, 0)
         self.task_manager._speed_monitor.set_target_worker_num(1)
         ts = int(time.time())
@@ -205,8 +312,10 @@ class MasterServicerTest(unittest.TestCase):
 
     def test_query_ps_nodes(self):
         self.job_manager._init_nodes()
-        for node in self.job_manager._job_nodes[NodeType.PS].values():
+        nodes = self.job_context.job_nodes_by_type(NodeType.PS)
+        for node in nodes.values():
             node.status = NodeStatus.RUNNING
+            self.job_context.update_job_node(node)
         res = self.servicer._query_ps_nodes()
         self.assertEqual(len(res.nodes), 3)
         self.assertEqual(
@@ -220,30 +329,30 @@ class MasterServicerTest(unittest.TestCase):
         self.assertEqual(response.data, b"")
 
     def test_get_cluster_version(self):
-        message = grpc.ClusterVersionRequest(NodeType.WORKER, 0, "local")
+        message = comm.ClusterVersionRequest(NodeType.WORKER, 0, "local")
         request = elastic_training_pb2.Message()
         request.data = message.serialize()
         response = self.servicer.get(request, None)
-        res_msg = grpc.deserialize_message(response.data)
+        res_msg = comm.deserialize_message(response.data)
         self.assertEqual(res_msg.version, 0)
 
-        message = grpc.ClusterVersionRequest(NodeType.PS, 0, "local")
+        message = comm.ClusterVersionRequest(NodeType.PS, 0, "local")
         request = elastic_training_pb2.Message()
         request.data = message.serialize()
         response = self.servicer.get(request, None)
-        res_msg = grpc.deserialize_message(response.data)
+        res_msg = comm.deserialize_message(response.data)
         self.assertEqual(res_msg.version, 0)
 
     def test_get_training_status(self):
-        message = grpc.TrainingStatusRequest()
+        message = comm.TrainingStatusRequest()
         request = elastic_training_pb2.Message()
         request.data = message.serialize()
         response = self.servicer.get(request, None)
-        res_msg: grpc.TrainingStatus = grpc.deserialize_message(response.data)
+        res_msg: comm.TrainingStatus = comm.deserialize_message(response.data)
         self.assertEqual(res_msg.status, 3)
 
     def test_num_nodes_waiting(self):
-        message = grpc.WaitingNodeNumRequest(
+        message = comm.WaitingNodeNumRequest(
             0, 8, RendezvousName.ELASTIC_TRAINING
         )
         request = elastic_training_pb2.Message()
@@ -252,7 +361,7 @@ class MasterServicerTest(unittest.TestCase):
             RendezvousName.ELASTIC_TRAINING
         ]._waiting_nodes = {0: 8}
         response = self.servicer.get(request, None)
-        res_msg: grpc.RendezvousState = grpc.deserialize_message(response.data)
+        res_msg: comm.RendezvousState = comm.deserialize_message(response.data)
         self.assertEqual(res_msg.waiting_num, 1)
 
     def test_report(self):
@@ -263,8 +372,8 @@ class MasterServicerTest(unittest.TestCase):
 
     def test_report_task_result(self):
         request = elastic_training_pb2.Message()
-        message = grpc.TaskResult("test", 0, "error")
-        dataset_params = grpc.DatasetShardParams(
+        message = comm.TaskResult("test", 0, "error")
+        dataset_params = comm.DatasetShardParams(
             batch_size=64,
             num_epochs=1,
             dataset_size=10000,
@@ -277,7 +386,7 @@ class MasterServicerTest(unittest.TestCase):
         response = self.servicer.report(request, None)
         self.assertFalse(response.success, False)
 
-        message = grpc.TaskResult("test", 0, "")
+        message = comm.TaskResult("test", 0, "")
         request.data = message.serialize()
         self.servicer._start_autoscale = False
         self.servicer._speed_monitor.completed_global_step == 0
@@ -288,7 +397,7 @@ class MasterServicerTest(unittest.TestCase):
 
     def test_update_cluster_version(self):
         request = elastic_training_pb2.Message()
-        message = grpc.ClusterVersion(
+        message = comm.ClusterVersion(
             NodeType.WORKER, 0, PSClusterVersionType.LOCAL, 1
         )
         request.data = message.serialize()
@@ -298,7 +407,7 @@ class MasterServicerTest(unittest.TestCase):
             self.servicer._elastic_ps_service._worker_local_version[0], 1
         )
 
-        message = grpc.ClusterVersion(
+        message = comm.ClusterVersion(
             NodeType.WORKER, 0, PSClusterVersionType.RESTORED, 1
         )
         request.data = message.serialize()
@@ -308,7 +417,7 @@ class MasterServicerTest(unittest.TestCase):
             self.servicer._elastic_ps_service._worker_restored_version[0], 1
         )
 
-        message = grpc.ClusterVersion(
+        message = comm.ClusterVersion(
             NodeType.PS, 0, PSClusterVersionType.GLOBAL, 1
         )
         request.data = message.serialize()
@@ -318,7 +427,7 @@ class MasterServicerTest(unittest.TestCase):
 
     def test_sync(self):
         request = elastic_training_pb2.Message()
-        message = grpc.SyncJoin("test")
+        message = comm.SyncJoin("test")
         request.data = message.serialize()
         request.node_type = NodeType.WORKER
         request.node_id = 0
@@ -327,7 +436,7 @@ class MasterServicerTest(unittest.TestCase):
         sync_obj = self.servicer._sync_service._sync_objs_target["test"]
         self.assertEqual(len(sync_obj), 2)
 
-        message = grpc.SyncFinish("test")
+        message = comm.SyncFinish("test")
         request.data = message.serialize()
         response = self.servicer.report(request, None)
         self.assertFalse(response.success)
@@ -336,7 +445,7 @@ class MasterServicerTest(unittest.TestCase):
         response = self.servicer.report(request, None)
         self.assertTrue(response.success)
 
-        message = grpc.SyncBarrier("test")
+        message = comm.SyncBarrier("test")
         request.data = message.serialize()
         response = self.servicer.report(request, None)
         self.assertFalse(response.success)
@@ -346,41 +455,41 @@ class MasterServicerTest(unittest.TestCase):
         self.assertTrue(response.success)
 
     def test_get_paral_config(self):
-        message = grpc.ParallelConfigRequest()
+        message = comm.ParallelConfigRequest()
         request = elastic_training_pb2.Message()
         request.data = message.serialize()
         self.servicer.report(request, None)
         response = self.servicer.get(request, None)
-        config = grpc.deserialize_message(response.data)
+        config = comm.deserialize_message(response.data)
         if config:
-            self.assertIsInstance(config, grpc.ParallelConfig)
+            self.assertIsInstance(config, comm.ParallelConfig)
 
     def test_get_straggler(self):
-        message = grpc.StragglerExistRequest()
+        message = comm.StragglerExistRequest()
         request = elastic_training_pb2.Message()
         request.data = message.serialize()
         self.servicer.report(request, None)
         response = self.servicer.get(request, None)
-        config = grpc.deserialize_message(response.data)
-        self.assertIsInstance(config, grpc.NetworkCheckResult)
+        config = comm.deserialize_message(response.data)
+        self.assertIsInstance(config, comm.NetworkCheckResult)
 
     def test_check_hardware_reset(self):
-        message = grpc.CheckHardwareResetRequest()
+        message = comm.CheckHardwareResetRequest()
         request = elastic_training_pb2.Message()
         request.data = message.serialize()
         response = self.servicer.get(request, None)
-        config = grpc.deserialize_message(response.data)
-        self.assertIsInstance(config, grpc.ParallelConfig)
+        config = comm.deserialize_message(response.data)
+        self.assertIsInstance(config, comm.ParallelConfig)
         self.assertFalse(config.restart)
 
     def test_join_rendezvous(self):
-        request = grpc.JoinRendezvousRequest(
+        request = comm.JoinRendezvousRequest(
             0, 8, RendezvousName.ELASTIC_TRAINING
         )
         self.servicer._join_rendezvous(request)
         res = self.servicer._num_nodes_waiting(RendezvousName.ELASTIC_TRAINING)
         self.assertEqual(res.waiting_num, 1)
-        request = grpc.JoinRendezvousRequest(
+        request = comm.JoinRendezvousRequest(
             0, 8, RendezvousName.NETWORK_CHECK
         )
         self.servicer._join_rendezvous(request)
@@ -390,16 +499,17 @@ class MasterServicerTest(unittest.TestCase):
     def test_report_heartbeat(self):
         request = elastic_training_pb2.Message()
         ts = int(time.time())
-        message = grpc.HeartBeat(ts)
+        message = comm.HeartBeat(ts)
         request.data = message.serialize()
         request.node_type = NodeType.WORKER
         request.node_id = 0
-        self.servicer.report(request, None)
-        worker0 = self.servicer._job_manager._job_nodes[NodeType.WORKER][0]
+        self.servicer.get(request, None)
+
+        worker0 = self.job_context.job_node(NodeType.WORKER, 0)
         self.assertEqual(worker0.heartbeat_time, ts)
 
     def test_sync_checkpoint(self):
-        message = grpc.NodeCheckpointState(step=100)
+        message = comm.NodeCheckpointState(step=100)
         et_name = RendezvousName.ELASTIC_TRAINING
         rdzv_manager = self.servicer._rdzv_managers[et_name]
         rdzv_manager._latest_rdzv_nodes = [0, 1]
@@ -408,7 +518,7 @@ class MasterServicerTest(unittest.TestCase):
         success = self.servicer._sync_checkpoint(NodeType.WORKER, 1, message)
         self.assertTrue(success)
 
-    def test_report_worker_diagnosis_data(self):
+    def test_report_node_diagnosis_data(self):
         test = WorkerTrainingMetric(
             data_content="test123",
             node_id=env_utils.get_node_id(),
@@ -417,12 +527,66 @@ class MasterServicerTest(unittest.TestCase):
             is_final_result=True,
         )
 
-        request = grpc.DiagnosisReportData(
+        request = comm.DiagnosisReportData(
             test.__class__.__name__,
             test.to_json(),
             test.node_rank,
         )
-        self.assertTrue(self.servicer._report_worker_diagnosis_data(request))
+        self.assertTrue(self.servicer._report_node_diagnosis_data(request))
+
+    def test_deal_with_reported_node_event(self):
+        request = comm.NodeEvent(node=comm.NodeMeta())
+        task_id = 1
+        task_type = NodeType.PS
+        request.node.type = task_type
+        request.node.id = task_id
+        request.event_type = NodeEventType.DELETED
+        request.message = "OOM"
+        self.assertTrue(self.servicer._deal_with_reported_node_event(request))
+        self.assertFalse(
+            self.job_manager._job_context.job_node(
+                task_type, task_id
+            ).is_succeeded_and_exited()
+        )
+
+        request.event_type = NodeEventType.NODE_CHECK_FAILED
+        request.message = ""
+        self.assertTrue(self.servicer._deal_with_reported_node_event(request))
+        self.assertTrue(
+            self.job_manager._job_context.job_node(
+                task_type, task_id
+            ).is_node_check_failed()
+        )
+
+        request.event_type = NodeEventType.SUCCEEDED_EXITED
+        request.message = ""
+        self.assertTrue(self.servicer._deal_with_reported_node_event(request))
+        self.assertTrue(
+            self.job_manager._job_context.job_node(
+                task_type, task_id
+            ).is_succeeded_and_exited()
+        )
+        self.assertFalse(
+            self.job_manager._job_context.job_node(
+                task_type, task_id
+            ).is_node_check_failed()
+        )
+
+        task_id = 2
+        request.event_type = NodeEventType.FAILED_EXITED
+        request.node.id = task_id
+        request.message = ""
+        self.assertTrue(self.servicer._deal_with_reported_node_event(request))
+        self.assertTrue(
+            self.job_manager._job_context.job_node(
+                task_type, task_id
+            ).is_failed_and_exited()
+        )
+        self.assertFalse(
+            self.job_manager._job_context.job_node(
+                task_type, task_id
+            ).is_node_check_failed()
+        )
 
 
 class MasterServicerForRayTest(unittest.TestCase):
@@ -437,7 +601,7 @@ class MasterServicerForRayTest(unittest.TestCase):
             "1", "default", "local", "dlrover"
         )
         self.elastic_ps_service = ElasticPsService()
-        self.servicer = MasterServicer(
+        self.servicer = GrpcMasterServicer(
             task_manager=self.task_manager,
             job_manager=self.job_manager,
             speed_monitor=speed_monitor,
@@ -446,9 +610,13 @@ class MasterServicerForRayTest(unittest.TestCase):
             job_metric_collector=self.job_metric_collector,
             elastic_ps_service=self.elastic_ps_service,
         )
+        self.job_context = get_job_context()
+
+    def tearDown(self) -> None:
+        self.job_context.clear_job_nodes()
 
     def test_update_node_addr(self):
-        request = grpc.NodeMeta()
+        request = comm.NodeMeta()
         task_id = 1
         task_type = NodeType.PS
         addr = "localhost:5001"
@@ -457,23 +625,12 @@ class MasterServicerForRayTest(unittest.TestCase):
         request.addr = "localhost:5001"
         self.job_manager._init_nodes()
         self.servicer._update_node_address(request)
-        self.assertEqual(
-            self.job_manager._job_nodes[task_type][task_id].service_addr, addr
-        )
-        for node in self.job_manager._job_nodes[NodeType.PS].values():
+        node = self.job_context.job_node(task_type, task_id)
+        self.assertEqual(node.service_addr, addr)
+        ps_nodes = self.job_context.job_nodes_by_type(NodeType.PS)
+        for node in ps_nodes.values():
             node.status = NodeStatus.RUNNING
+            self.job_context.update_job_node(node)
         res = self.servicer._query_ps_nodes()
         self.assertEqual(addr, res.nodes[task_id].addr)
         self.assertEqual("", res.nodes[0].addr)
-
-    def test_update_node_event(self):
-        request = grpc.NodeEvent(node=grpc.NodeMeta())
-        task_id = 1
-        task_type = NodeType.PS
-        request.node.type = task_type
-        request.node.id = task_id
-        request.event_type = "Deleted"
-        request.message = "OOM"
-        self.servicer._update_node_event(request)
-        event = ray_event_queue.get()
-        event.event_type = "OOM"
