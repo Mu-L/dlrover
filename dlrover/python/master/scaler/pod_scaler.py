@@ -224,7 +224,7 @@ class PodScaler(Scaler):
         while self._started:
             if (
                 len(self._create_node_queue) > 0
-                and not _job_context.is_request_stopped()
+                and not _job_context.is_stopped()
             ):
                 logger.info(
                     f"Wait nodes {self._create_node_queue} to completed."
