@@ -1091,6 +1091,8 @@ class DistributedJobManager(JobManager):
             )
         else:
             logger.error("Not support node type %s", node.type)
+            return
+
         if plan and len(plan.launch_nodes) > 0:
             self._event_reporter.report_node_relaunch(
                 node, plan.launch_nodes[0]
@@ -1106,7 +1108,7 @@ class DistributedJobManager(JobManager):
         self._job_context.update_job_node(node)
         if node.has_group():
             self._job_context.update_job_node_by_group(node)
-        self._scaler.scale(plan)
+        self._scaler.scale(plan, with_merge=True)
 
     def _relaunch_node_group(self, node_group: int):
         """
